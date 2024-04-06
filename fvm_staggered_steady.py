@@ -3,9 +3,13 @@ import matplotlib.pyplot as plt
 import copy
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import bicgstab
+from scipy.interpolate import RegularGridInterpolator
+from Sparse import SparseMatrix
+from Sparse import GaussSeidel
+
 
 #ub = [top, east, south, west]
-
+'''
 def gaussSeidel(n, tol, maxIter, rel, T0, A, b):
     T = copy.deepcopy(T0)
     iter = 0
@@ -29,6 +33,8 @@ def gaussSeidel(n, tol, maxIter, rel, T0, A, b):
             print(f"Res {norm}")
     
     return T
+'''
+
 
 def solveMomU(n, dx, rho, gamma, alphau, ub, phi0, u, v, p):
     numVol = n * (n+1)
@@ -55,6 +61,7 @@ def solveMomU(n, dx, rho, gamma, alphau, ub, phi0, u, v, p):
     
     index = np.array(range(n*(n+1)))
     index = np.delete(index, np.concatenate((index_east, index_west)))
+
     
     aW = Dw + np.maximum(Fw.flatten(),0)
     aE = De + np.maximum(-Fe.flatten(),0)
@@ -89,6 +96,8 @@ def solveMomU(n, dx, rho, gamma, alphau, ub, phi0, u, v, p):
     b[index] += (1-alphau) * A[index, index] / alphau * u.flatten()[index]
     A[index, index] /= alphau
 
+    #u = GaussSeidel.solveu(SparseMatrix(A), b, 0.2, 1e-5, 10000, u.flatten(), updateBU, n, dx, rho, gamma, ub, v)
+    
     u, exitcode = bicgstab(csr_matrix(A), b, atol=1e-5)
 
     if exitcode == 0:
@@ -99,6 +108,160 @@ def solveMomU(n, dx, rho, gamma, alphau, ub, phi0, u, v, p):
     #u = gaussSeidel(numVol, 1e-06, 10000, 1, phi0.flatten(), A, b)
     
     return u.reshape(n, n+1), A[range(numVol),range(numVol)]
+
+def updateBU(n, dx, rho, gamma, ub, u, v):
+    Fe = (u[:,1:-1] + u[:,2:]) * rho / 2 * dx
+    Fw = (u[:,:-2] + u[:,1:-1]) * rho / 2 * dx
+    Fs = (v[:-2,:-1] + v[:-2,1:]) * rho / 2 * dx
+    Fn = (v[1:-1,:-1] + v[1:-1,1:]) * rho / 2 * dx
+    
+    DWFp = 0.5
+    DWFn = 0.5
+    
+    index_west = np.arange(0, (n+1)*(n-1)+1, n+1)
+    index_east = np.arange(n, (n+1)*n+1, n+1)
+
+    index = np.array(range(n*(n+1)))
+    index = np.delete(index, np.concatenate((index_east, index_west)))
+
+    b = np.zeros((n*(n+1),))
+    b[index] += (np.maximum(Fe, 0) * u[:,1:-1] - np.maximum(-Fe, 0) * u[:,2:]).flatten()
+    b[index] += (np.maximum(-Fw, 0) * u[:,1:-1] - np.maximum(Fw, 0) * u[:,:-2]).flatten()
+
+    index_north = np.arange((n+1)*(n-1)+1, (n+1)*(n-1)+n, 1)
+    index_exc_north = np.delete(index, np.ravel([np.where(index == i) for i in index_north]))
+    b[index_exc_north] += (np.maximum(Fn, 0) * u[:-1,1:-1] - np.maximum(-Fn, 0) * u[1:,1:-1]).flatten()
+
+    index_south = np.arange(1, n)
+    index_exc_south = np.delete(index, np.ravel([np.where(index == i) for i in index_south]))
+    b[index_exc_south] += (np.maximum(-Fs, 0) * u[1:,1:-1] - np.maximum(Fs, 0) * u[:-1,1:-1]).flatten()
+    
+    tol = 1e-10
+    
+    num = np.hstack((u[:,:1] - 2*ub[3] + u[:,1:2], u[:,1:-1] - u[:,0:-2]))
+    den = np.hstack((2*u[:,1:2] - 2*ub[3], u[:,2:] - u[:,0:-2]))
+    phiTildepv = grad(num, den, tol)
+
+    num = np.hstack(((u[:,1:-1] - u[:,2:]), (u[:,-1:] - 2 * ub[1] + u[:,-2:-1])))
+    den = np.hstack(((u[:,:-2] - u[:,2:]), (2*u[:,-2:-1] - 2*ub[1])))
+    phiTildenv = grad(num, den, tol)
+
+    num = np.vstack(((2 * u[0,1:-1] - 2 * ub[2]), (u[1:-1,1:-1] - u[:-2,1:-1])))
+    den = np.vstack(((u[1,1:-1] + u[0,1:-1] - 2*ub[2]), (u[2:,1:-1] - u[:-2,1:-1])))
+    phiTildeph = grad(num, den, tol)
+
+    num = np.vstack(((u[1:-1,1:-1] - u[2:,1:-1]), (2 * u[-1,1:-1] - 2 * ub[0])))
+    den = np.vstack(((u[0:-2, 1:-1] - u[2:,1:-1]), (u[-2,1:-1] - 2*ub[0] + u[-1,1:-1])))
+    phiTildenh = grad(num, den, tol)
+    
+    #dwf = lambda phi : grad(phi, (2*(1-phi)), tol)
+    #dwf = lambda phi: 0.5 + phi-phi
+    
+    Dwfpv = dwf(phiTildepv)
+    Dwfnv = dwf(phiTildenv)
+    Dwfph = dwf(phiTildeph)
+    Dwfnh = dwf(phiTildenh)
+
+    b[index_exc_north] -= (np.maximum(Fn, 0) * (Dwfph * u[1:,1:-1] + (1-Dwfph) * u[:-1,1:-1])).flatten()
+    b[index_exc_north] += (np.maximum(-Fn, 0) * (Dwfnh * u[:-1,1:-1] + (1-Dwfnh) * u[1:,1:-1])).flatten()
+    
+    b[index_exc_south] -= (np.maximum(-Fs, 0) * (Dwfph * u[:-1,1:-1] + (1-Dwfph) * u[1:,1:-1])).flatten()
+    b[index_exc_south] += (np.maximum(Fs, 0) * (Dwfnh * u[1:,1:-1] + (1-Dwfnh) * u[:-1,1:-1])).flatten()
+
+    b[index] -= (np.maximum(Fe, 0) * (Dwfpv[:,1:] * u[:,2:] + (1-Dwfpv[:,1:]) * u[:,1:-1])).flatten()
+    b[index] += (np.maximum(-Fe, 0) * (Dwfnv[:,1:] * u[:,1:-1] + (1-Dwfnv[:,1:]) * u[:,2:])).flatten()
+
+    b[index] -= (np.maximum(-Fw, 0) * (Dwfpv[:,:-1] * u[:,:-2] + (1-Dwfpv[:,:-1]) * u[:,1:-1])).flatten()
+    b[index] += (np.maximum(Fw, 0) * (Dwfnv[:,:-1] * u[:,1:-1] + (1-Dwfnv[:,:-1]) * u[:,:-2])).flatten()
+    
+    return b
+
+def updateBV(n, dx, rho, gamma, vb, u, v):
+    Fe = (u[:-1,1:-1] + u[1:,1:-1]) * rho / 2 * dx
+    Fw = (u[:-1,1:-1] + u[1:,1:-1]) * rho / 2 * dx
+    Fs = (v[:-2,:] + v[1:-1,:]) * rho / 2 * dx
+    Fn = (v[1:-1,:] + v[2:,:]) * rho / 2 * dx
+    
+    DWFp = 0.5
+    DWFn = 0.5
+    
+    index_north = np.arange(n*n, (n+1)*n, 1)
+    index_south = np.arange(0, n)
+
+    index = np.array(range(n*(n+1)))
+    index = np.delete(index, np.concatenate((index_north, index_south)))
+   
+    b = np.zeros((n*(n+1),))
+    b[index] += (np.maximum(Fn, 0) * v[1:-1,:] - np.maximum(-Fn, 0) * v[2:,:]).flatten()
+    b[index] += (np.maximum(-Fs, 0) * v[1:-1,:] - np.maximum(Fs, 0) * v[:-2,:]).flatten()
+
+    index_east = np.arange(2*n-1, n*(n+1)-1, n)
+    index_exc_east = np.delete(index, np.ravel([np.where(index == i) for i in index_east]))
+    b[index_exc_east] += (np.maximum(Fe, 0) * v[1:-1,:-1] - np.maximum(-Fe, 0) * v[1:-1,1:]).flatten()
+
+    index_west = np.arange(n, n*n, n)
+    index_exc_west = np.delete(index, np.ravel([np.where(index == i) for i in index_west]))
+    b[index_exc_west] += (np.maximum(-Fw, 0) * v[1:-1,1:] - np.maximum(Fw, 0) * v[1:-1,:-1]).flatten()
+
+    tol = 1e-10
+    
+    num = np.hstack((2*v[1:-1, 0:1] - 2*vb[3], v[1:-1, 1:-1] - v[1:-1,:-2]))
+    den = np.hstack((v[1:-1,1:2] - 2*vb[3] + v[1:-1,0:1], v[1:-1,2:] - v[1:-1,:-2]))
+    phiTildepv = grad(num, den, tol)
+   
+    num = np.hstack((v[1:-1, 1:-1] - v[1:-1, 2:], 2*v[1:-1,-1:] - 2*vb[1]))
+    den = np.hstack((v[1:-1,:-2] - v[1:-1, 2:], v[1:-1,-2:-1] - 2*vb[1] + v[1:-1,-1:]))
+    phiTildenv = grad(num, den, tol)
+ 
+    num = np.vstack((v[0,:] - 2*vb[2] + v[1,:], v[1:-1, :] - v[:-2,:]))
+    den = np.vstack((2*v[1,:] - 2*vb[2], v[2:,:] - v[:-2,:]))
+    phiTildeph = grad(num, den, tol)
+    
+    num = np.vstack((v[1:-1,:] - v[2:,:], v[-1,:] - 2*vb[0] + v[-2,:]))
+    den = np.vstack((v[:-2,:] - v[2:,:], 2*v[-2,:] - 2*vb[0]))
+    phiTildenh = grad(num, den, tol)
+    
+    #dwf = lambda phi : grad(np.array([1]), np.array([2]), tol) 
+    #dwf = lambda phi: 0.5 + phi-phi
+    #dwf = lambda phi : grad(phi, (2*(1-phi)), tol)
+
+    
+    Dwfpv = dwf(phiTildepv)
+    Dwfnv = dwf(phiTildenv)
+    Dwfph = dwf(phiTildeph)
+    Dwfnh = dwf(phiTildenh)
+
+
+    b[index_exc_east] -= (np.maximum(Fe, 0) * (Dwfpv * v[1:-1,1:] + (1-Dwfpv) * v[1:-1,:-1])).flatten()
+    b[index_exc_east] += (np.maximum(-Fe, 0) * (Dwfnv * v[1:-1,:-1] + (1-Dwfnv) * v[1:-1,1:])).flatten()
+    
+    b[index_exc_west] -= (np.maximum(-Fw, 0) * (Dwfpv * v[1:-1,:-1] + (1-Dwfpv) * v[1:-1,1:])).flatten()
+    b[index_exc_west] += (np.maximum(Fw, 0) * (Dwfnv * v[1:-1,1:] + (1-Dwfnv) * v[1:-1,:-1])).flatten()
+
+    b[index] -= (np.maximum(Fn, 0) * (Dwfph[1:,:] * v[2:,:] + (1-Dwfph[1:,:]) * v[1:-1,:])).flatten()
+    b[index] += (np.maximum(-Fn, 0) * (Dwfnh[1:,:] * v[1:-1,:] + (1-Dwfnh[1:,:]) * v[2:,:])).flatten()
+
+    b[index] -= (np.maximum(-Fs, 0) * (Dwfph[:-1,:] * v[:-2,:] + (1-Dwfph[-1:,:]) * v[1:-1,:])).flatten()
+    b[index] += (np.maximum(Fs, 0) * (Dwfnh[:-1,:] * v[1:-1,:] + (1-Dwfnh[-1:,:]) * v[:-2,:])).flatten()
+
+    return b
+
+def grad(n, d, tol):
+    n[(n<tol) & (n>=0)] = tol
+    n[(n>-tol) & (n<=0)] = -tol
+
+    d[(d<tol) & (d>=0)] = tol
+    d[(d>-tol) & (d<=0)] = -tol
+    #d[d==0] = tol
+   
+    return n / d
+    
+def dwf(phi):
+        d = np.zeros(phi.shape)
+        d[np.logical_and(phi <=1,phi >= 0)] = 1/2
+        return d
+
+
 
 def solveMomV(n, dx, rho, gamma, alphav, vb, phi0, u, v, p):
     numVol = n * (n+1)
@@ -128,6 +291,7 @@ def solveMomV(n, dx, rho, gamma, alphav, vb, phi0, u, v, p):
 
     index_west = np.arange(n, n*n, n)
     index_exc_west = np.delete(index, np.ravel([np.where(index == i) for i in index_west]))
+    
     aW = Dw + np.maximum(Fw.flatten(),0)
     A[index_exc_west, index_exc_west - 1] = -aW
     uwest = (u[1:,0] + u[:-1,0]) / 2
@@ -159,7 +323,8 @@ def solveMomV(n, dx, rho, gamma, alphav, vb, phi0, u, v, p):
     b[index] += (1-alphav) * A[index, index] / alphav * v.flatten()[index]
     A[index, index] /= alphav
 
-    #v = gaussSeidel(numVol, 1e-06, 10000, 1, phi0.flatten(), A, b)
+    #v = GaussSeidel.solvev(SparseMatrix(A), b, 0.2, 1e-5, 1000, v.flatten(), updateBV, n, dx, rho, gamma, vb, u)
+    #v = GaussSeidel.solve(SparseMatrix(A), b, 1, 1e-5, 1000, v.flatten())
     
     v, exitcode = bicgstab(csr_matrix(A), b, atol=1e-5)
 
@@ -167,6 +332,7 @@ def solveMomV(n, dx, rho, gamma, alphav, vb, phi0, u, v, p):
         print("Converged")
     else:
         print("Diverged")
+    
 
     return v.reshape(n+1,n), A[range(numVol), range(numVol)]
 
@@ -223,7 +389,7 @@ def simple(n, dx, rho, gamma, alphap):
     u = np.zeros((n, n+1))
     v = np.zeros((n+1, n))
 
-    maxIter = 10000
+    maxIter = 2000
     iter = 0
     while True:
         iter += 1
@@ -239,19 +405,10 @@ def simple(n, dx, rho, gamma, alphap):
 
         pt = pcor.reshape(n,n)
 
-        #u_index_global = np.arange(0, n*(n+1))
-        #u_index_west = np.arange(0, (n+1)*n, n+1)
-        #u_index_east = np.arange(n, (n+1)*n+1, n+1)
-        #u_index_center = np.delete(u_index_global, np.ravel([np.where(u_index_global == i) for i in np.concatenate((u_index_east, u_index_west))]))
-        #ucor = dx / aCU[u_index_center] * (pt[:,:-1] - pt[:,1:]).flatten()
         u = copy.deepcopy(ustar)
         ucor = dx / aCU.reshape(n, n+1)[:,1:-1] * (pt[:,:-1] - pt[:,1:])
         u[:,1:-1] += ucor
-
         
-        #v_index_north = np.arange(n*n, n*(n+1), 1)
-        #v_index_south = np.arange(0, n, 1)
-        #v_index_center = np.delete(u_index_global, np.ravel([np.where(u_index_global == i) for i in np.concatenate((v_index_north, v_index_south))]))
         v = copy.deepcopy(vstar)
         vcor = dx / aCV.reshape(n+1, n)[1:-1,:] * (pt[:-1,:] - pt[1:,:])
         v[1:-1,:] += vcor
@@ -266,8 +423,8 @@ def simple(n, dx, rho, gamma, alphap):
         npc = np.linalg.norm(pcor.flatten())
         print(f"u: {nu} v: {nv} np: {npc}")
         print(f"Mass imbalance: {divu}")
-        #if nu < tol and nv < tol and npc < tol:
-        if divu < tol or (nu < tol and nv < tol and npc < tol):
+        if nu < tol and nv < tol and npc < tol:
+        #if divu < tol or (nu < tol and nv < tol and npc < tol):
             print(f"Simple converged after {iter} iterations")
             break
         elif maxIter == iter:
@@ -278,27 +435,96 @@ def simple(n, dx, rho, gamma, alphap):
         vstar = copy.deepcopy(v)
         pstar = copy.deepcopy(p)
 
-    plt.figure()
-    plt.contourf(p)
+    print(np.max(u), np.min(u), np.max(v), np.min(v))
+
+    '''
+    fig = plt.figure()
+    cf = plt.contourf(pcor)
+    fig.colorbar(cf)
     plt.show()
 
     plt.figure()
-    plt.contourf(u)
+    cf = plt.contourf(ustar)
+    fig.colorbar(cf)
     plt.show()
 
     plt.figure()
-    plt.contourf(v)
+    cf = plt.contourf(vstar)
+    fig.colorbar(cf)
     plt.show()
+    '''
+    fig = plt.figure()
+    cf = plt.contourf(p)
+    fig.colorbar(cf)
+    plt.show()
+
+    plt.figure()
+    cf = plt.contourf(u)
+    fig.colorbar(cf)
+    plt.show()
+
+    plt.figure()
+    cf = plt.contourf(v)
+    fig.colorbar(cf)
+    plt.show()
+    '''
+    plt.figure()
+    cf = plt.contourf(ucor)
+    fig.colorbar(cf)
+    plt.show()
+
+    plt.figure()
+    cf = plt.contourf(vcor)
+    fig.colorbar(cf)
+    plt.show()
+    '''
+
+    xx = np.linspace(0, 1, n+1)
+    yy = np.linspace(dx/2, 1-dx/2, n)
+    
+    interpu = RegularGridInterpolator((xx, yy), u.T)
+    interpv = RegularGridInterpolator((yy, xx), v.T)
+
+    xi = 0.5 * np.ones((n,))
+    
+    plt.figure()
+    plt.plot(interpu(np.stack((xi, yy), axis=1)), yy)
+    plt.xlabel("y")
+    plt.ylabel("u")
+    plt.show()
+
+    plt.figure()
+    plt.plot(yy, interpv(np.stack((yy, xi), axis=1)))
+    plt.xlabel("x")
+    plt.ylabel("v")
+    plt.show()
+    print(np.max(interpv(np.stack((yy, xi), axis=1))))
 
 def main():
-    n = 50
+    n = 10
     L = 1
     dx = L/n
 
-    rho = 10
+    rho = 100
     gamma = 1
+    u = np.ones((n, n+1))
+    u[:,0] = 0
+    u[:,1] = 1
+    u[:,2] = 2
+    u[:,3] = 3
 
-    simple(n, dx, rho, gamma, 0.4)
-
+    simple(n, dx, rho, gamma, 0.5)
+    
+    
+    rng = np.random.default_rng(0)
+    t = rng.integers(-10, 10, (n+1, n))
+    #t[:,0] = 0
+    #t[:,-1] = 0
+    t[0,:] = 0
+    t[-1,:] = 0
+    t = t.astype(np.double)
+    #updateBV(n, dx, rho, gamma, [0, 0, 0, 0], np.zeros((n,n+1)), t)
+    
 if __name__ == '__main__':
     main()
+
